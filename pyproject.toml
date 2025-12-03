@@ -1,0 +1,41 @@
+[project]
+name = "hic2microc-mar"
+version = "0.1.0"
+description = "Unified Hi-C to Micro-C DDPM + MAR project"
+readme = "README.md"
+authors = [
+    { name = "Banghao Chi", email = "banghao2@illinois.edu" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.4.0",
+    "numpy>=1.24",
+    "scipy",
+    "pandas",
+    "cooler",
+    "cooltools",
+    "tqdm",
+    "pyyaml",
+    "matplotlib",
+    "einops",
+    "timm",
+    "torch-fidelity",
+]
+
+[project.optional-dependencies]
+loops = [
+    # Mustache and SIP are sometimes only via pip; keep optional
+    "mustache-hic; platform_system == 'Linux' or platform_system == 'Darwin'",
+]
+
+[project.scripts]
+train-ddpm = "hic2microc_mar.train_ddpm:main"
+infer-ddpm = "hic2microc_mar.infer_ddpm:main"
+train-mar = "hic2microc_mar.train_mar:main"
+infer-mar = "hic2microc_mar.infer_mar:main"
+prepare-cool = "hic2microc_mar.data.prepare_cool:main"
+evaluate-hic2microc = "hic2microc_mar.evaluate_hic2microc:main"
+
+[build-system]
+requires = ["uv_build>=0.9.3,<0.10.0"]
+build-backend = "uv_build"

@@ -1,0 +1,37 @@
+seed: 123
+device: auto
+output_dir: checkpoints/ddpm_hff_5kb_debug
+
+data:
+  cell_type: HFFc6
+  resolution: 5000
+  chromosomes_train:
+    - chr2
+  chromosomes_val:
+    - chr17
+  hic_root: data/cool
+  microc_root: data/cool
+
+model:
+  dim: 32
+  dim_mults: [1, 2, 4]
+  resnet_block_groups: 4
+  weight_standardized: false
+  use_linear_attention: true
+
+optimizer:
+  batch_size: 2
+  lr: 1.0e-4
+  weight_decay: 0.0
+  epochs: 2
+
+diffusion:
+  timesteps_train: 100
+  beta_start_train: 1.0e-4
+  beta_end_train: 2.0e-2
+  timesteps_infer: 10
+  beta_start_infer: 1.0e-4
+  beta_end_infer: 0.95
+
+loss: l1
+

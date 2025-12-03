@@ -1,0 +1,48 @@
+seed: 123
+device: auto
+output_dir: checkpoints/mar_hff_5kb_debug
+
+data:
+  cell_type: HFFc6
+  resolution: 5000
+  chromosomes_train:
+    - chr2
+  chromosomes_val:
+    - chr17
+  hic_root: data/cool
+  microc_root: data/cool
+
+optimizer:
+  batch_size: 2
+  lr: 1.0e-4
+  weight_decay: 0.0
+  epochs: 2
+
+tokenizer:
+  img_size: 256
+  patch_size: 16
+  token_dim: 128
+
+mar:
+  img_size: 256
+  patch_size: 16
+  token_dim: 128
+  encoder_embed_dim: 256
+  encoder_depth: 2
+  encoder_num_heads: 4
+  decoder_embed_dim: 256
+  decoder_depth: 2
+  decoder_num_heads: 4
+  mlp_ratio: 4.0
+  attn_dropout: 0.1
+  proj_dropout: 0.1
+  buffer_size: 8
+  mask_ratio_min: 0.7
+  grad_checkpointing: false
+
+diff_head:
+  width: 256
+  depth: 2
+  diffusion_steps: 200
+  num_sampling_steps: "20"
+
