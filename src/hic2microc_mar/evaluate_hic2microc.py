@@ -2,22 +2,31 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Sequence, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 import cooler
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
 from torch_fidelity import calculate_metrics
 from tqdm import tqdm
 
-from .data.dataset import HiC2MicroCDataset
-from .data.utils import DEFAULT_MAXV_1KB, DEFAULT_MAXV_5KB
+from .data.utils import (
+    DEFAULT_MAXV_1KB,
+    DEFAULT_MAXV_5KB,
+    add_weight_column,
+    get_chr_start_indices,
+    merge_patch_predictions,
+)
 from .infer_ddpm import infer_chromosome as ddpm_infer_chrom
+from .infer_ddpm import write_cool_from_coo as ddpm_write_cool
 from .infer_mar import infer_chromosome as mar_infer_chrom
+from .infer_mar import write_cool_from_coo as mar_write_cool
 from .train_ddpm import resolve_device
 
 
@@ -101,6 +110,42 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="MAR checkpoint (.pt).",
     )
+    parser.add_argument(
+        "--chrom-sizes",
+        type=str,
+        default="HiC2MicroC/data/hg38.sizes",
+        help="Chromosome sizes file used when building predicted .cool files.",
+    )
+    parser.add_argument(
+        "--mustache-template",
+        type=str,
+        default="",
+        help=(
+            "Shell template to call Mustache. "
+            "Placeholders: {cool}, {res}, {chrom}, {out}, {fdr}."
+        ),
+    )
+    parser.add_argument(
+        "--sip-template",
+        type=str,
+        default="",
+        help=(
+            "Shell template to call SIP. "
+            "Placeholders: {cool}, {res}, {chrom}, {out}, {fdr}."
+        ),
+    )
+    parser.add_argument(
+        "--loop-tolerance-bins",
+        type=int,
+        default=2,
+        help="Neighborhood tolerance in bins when matching loops.",
+    )
+    parser.add_argument(
+        "--apa-window-bins",
+        type=int,
+        default=5,
+        help="APA window half-size in bins (e.g. 5 → 11×11).",
+    )
     return parser.parse_args()
 
 
@@ -140,6 +185,88 @@ def get_maxv(resolution: int) -> float:
     if resolution == 1000:
         return DEFAULT_MAXV_1KB
     return DEFAULT_MAXV_5KB
+
+
+def ensure_predicted_cool_ddpm(
+    cfg: EvalConfig,
+    chrom_sizes_path: Path,
+) -> Path:
+    """Run DDPM inference to produce a genome-wide predicted .cool if needed."""
+    out_prefix = cfg.results_dir / f"ddpm_pred_{cfg.cell_type}_{cfg.resolution}"
+    cool_path = Path(str(out_prefix) + ".cool")
+    if cool_path.exists():
+        return cool_path
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "hic2microc_mar.infer_ddpm",
+        "--config",
+        str(cfg.ddpm_config),
+        "--checkpoint",
+        str(cfg.ddpm_checkpoint),
+        "--cell-type",
+        cfg.cell_type,
+        "--resolution",
+        str(cfg.resolution),
+        "--chromosomes",
+        *cfg.chromosomes,
+        "--hic-root",
+        "data/cool",
+        "--chrom-sizes",
+        str(chrom_sizes_path),
+        "--out-prefix",
+        str(out_prefix),
+        "--device",
+        "auto",
+    ]
+    print("[eval] Running DDPM inference to build predicted .cool...")
+    subprocess.run(cmd, check=True)
+    return cool_path
+
+
+def ensure_predicted_cool_mar(
+    cfg: EvalConfig,
+    chrom_sizes_path: Path,
+) -> Path:
+    """Run MAR inference to produce a genome-wide predicted .cool if needed."""
+    out_prefix = cfg.results_dir / f"mar_pred_{cfg.cell_type}_{cfg.resolution}"
+    cool_path = Path(str(out_prefix) + ".cool")
+    if cool_path.exists():
+        return cool_path
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "hic2microc_mar.infer_mar",
+        "--config",
+        str(cfg.mar_config),
+        "--checkpoint",
+        str(cfg.mar_checkpoint),
+        "--cell-type",
+        cfg.cell_type,
+        "--resolution",
+        str(cfg.resolution),
+        "--chromosomes",
+        *cfg.chromosomes,
+        "--hic-root",
+        "data/cool",
+        "--chrom-sizes",
+        str(chrom_sizes_path),
+        "--out-prefix",
+        str(out_prefix),
+        "--device",
+        "auto",
+        "--num-iter",
+        "64",
+        "--num-diffusion-steps",
+        "50",
+        "--temperature",
+        "1.0",
+    ]
+    print("[eval] Running MAR inference to build predicted .cool...")
+    subprocess.run(cmd, check=True)
+    return cool_path
 
 
 def compute_fid_for_model(
@@ -266,6 +393,183 @@ def evaluate_speed_and_generate(
     return preds, per_window, total_time
 
 
+def run_loop_caller_template(
+    template: str,
+    label: str,
+    cool_path: Path,
+    resolution: int,
+    chromosomes: Sequence[str],
+    fdr_values: Sequence[float],
+    out_dir: Path,
+    tool_name: str,
+) -> Path:
+    """Run an external loop caller via a user-provided shell template."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    per_chr_files: List[Path] = []
+
+    for chrom in chromosomes:
+        for fdr in fdr_values:
+            out_path = out_dir / f"{label}_{tool_name}_fdr{fdr}_{chrom}.bedpe"
+            cmd = template.format(
+                cool=str(cool_path),
+                res=resolution,
+                chrom=chrom,
+                out=str(out_path),
+                fdr=fdr,
+            )
+            print(f"[eval] Running {tool_name} on {label} {chrom} (FDR={fdr})...")
+            try:
+                subprocess.run(cmd, shell=True, check=True)
+                per_chr_files.append(out_path)
+            except FileNotFoundError:
+                print(f"[eval] {tool_name} not found on PATH; skipping.")
+                return Path()
+            except subprocess.CalledProcessError as exc:
+                print(f"[eval] {tool_name} failed (skipping): {exc}")
+                return Path()
+
+    merged = out_dir / f"{label}_{tool_name}_loops.bedpe"
+    with merged.open("w") as fout:
+        for path in per_chr_files:
+            if not path.exists():
+                continue
+            with path.open() as fin:
+                for line in fin:
+                    if not line.strip() or line.startswith("#"):
+                        continue
+                    fout.write(line)
+    return merged
+
+
+def parse_loops_bedpe(path: Path, resolution: int) -> List[Tuple[str, int, int]]:
+    """Parse a simple BEDPE-like loop file into (chrom, bin1, bin2)."""
+    loops: List[Tuple[str, int, int]] = []
+    if not path.exists():
+        return loops
+
+    with path.open() as f:
+        for line in f:
+            if not line.strip() or line.startswith("#"):
+                continue
+            parts = line.rstrip().split()
+            if len(parts) < 6:
+                continue
+            chrom1, start1, end1, chrom2, start2, end2 = parts[:6]
+            if chrom1 != chrom2:
+                continue
+            try:
+                s1 = int(start1)
+                s2 = int(start2)
+            except ValueError:
+                continue
+            bin1 = s1 // resolution
+            bin2 = s2 // resolution
+            if bin2 < bin1:
+                bin1, bin2 = bin2, bin1
+            loops.append((chrom1, bin1, bin2))
+    return loops
+
+
+def loop_overlap_metrics(
+    ref_loops: List[Tuple[str, int, int]],
+    pred_loops: List[Tuple[str, int, int]],
+    tol_bins: int,
+) -> Dict[str, float]:
+    """Compute simple recall/precision-style metrics for loop overlap."""
+    if not ref_loops or not pred_loops:
+        return {
+            "ref_count": float(len(ref_loops)),
+            "pred_count": float(len(pred_loops)),
+            "recall": 0.0,
+            "precision": 0.0,
+        }
+
+    matched_ref = set()
+    matched_pred = set()
+
+    for i_ref, (chrom_r, br1, br2) in enumerate(ref_loops):
+        for i_pred, (chrom_p, bp1, bp2) in enumerate(pred_loops):
+            if chrom_r != chrom_p:
+                continue
+            if abs(br1 - bp1) <= tol_bins and abs(br2 - bp2) <= tol_bins:
+                matched_ref.add(i_ref)
+                matched_pred.add(i_pred)
+                break
+
+    recall = len(matched_ref) / max(len(ref_loops), 1)
+    precision = len(matched_pred) / max(len(pred_loops), 1)
+    return {
+        "ref_count": float(len(ref_loops)),
+        "pred_count": float(len(pred_loops)),
+        "recall": float(recall),
+        "precision": float(precision),
+    }
+
+
+def compute_apa(
+    cool_path: Path,
+    loops: List[Tuple[str, int, int]],
+    resolution: int,
+    window_bins: int,
+) -> Tuple[np.ndarray, float]:
+    """Compute a simple APA matrix and score for a set of loops."""
+    clr = cooler.Cooler(str(cool_path))
+    size = 2 * window_bins + 1
+    apa_accum = np.zeros((size, size), dtype=float)
+    n_used = 0
+
+    for chrom, bin1, bin2 in loops:
+        if chrom not in clr.chromsizes:
+            continue
+        chr_len_bp = int(clr.chromsizes[chrom])
+        n_bins = math.ceil(chr_len_bp / resolution)
+        if bin1 < window_bins or bin2 < window_bins:
+            continue
+        if bin1 + window_bins >= n_bins or bin2 + window_bins >= n_bins:
+            continue
+
+        start1_bp = (bin1 - window_bins) * resolution
+        end1_bp = (bin1 + window_bins + 1) * resolution
+        start2_bp = (bin2 - window_bins) * resolution
+        end2_bp = (bin2 + window_bins + 1) * resolution
+        region1 = (chrom, start1_bp, end1_bp)
+        region2 = (chrom, start2_bp, end2_bp)
+
+        mat = clr.matrix(balance=True).fetch(region1, region2)
+        if mat.shape != apa_accum.shape:
+            continue
+        apa_accum += np.nan_to_num(mat)
+        n_used += 1
+
+    if n_used == 0:
+        return apa_accum, float("nan")
+
+    apa = apa_accum / n_used
+    center = apa[window_bins, window_bins]
+
+    c = max(1, window_bins // 2)
+    corner_mask = np.zeros_like(apa, dtype=bool)
+    corner_mask[:c, :c] = True
+    corner_mask[:c, -c:] = True
+    corner_mask[-c:, :c] = True
+    corner_mask[-c:, -c:] = True
+    corner_vals = apa[corner_mask]
+    apa_score = float(center / (corner_vals.mean() + 1e-8))
+    return apa, apa_score
+
+
+def save_apa_heatmap(apa: np.ndarray, out_path: Path, title: str) -> None:
+    """Save APA matrix as a PNG heatmap."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.figure(figsize=(4, 4))
+    plt.imshow(apa, origin="lower", cmap="coolwarm")
+    plt.colorbar()
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(out_path)
+    plt.close()
+
+
 def main() -> None:
     args = parse_args()
     cfg = build_eval_config(args)
@@ -390,10 +694,226 @@ def main() -> None:
             "num_windows": int(mar_preds.shape[0]),
         }
 
-    # NOTE: Loop calling (Mustache/SIP) and APA analyses are intentionally
-    # stubbed out here for simplicity. The evaluation scaffold is in place,
-    # and these can be added by extending this script to call the respective
-    # tools on the experimental and predicted .cool files.
+    # ------------------------------------------------------------------
+    # Loop calling (Mustache/SIP) and APA
+    # ------------------------------------------------------------------
+    chrom_sizes_path = Path(args.chrom_sizes)
+    loops_section: Dict[str, Dict[str, float]] = {}
+    apa_section: Dict[str, Dict[str, float]] = {}
+
+    # Prepare experimental coolers.
+    hic_exp_path = (
+        Path("data/cool")
+        / cfg.cell_type
+        / "HiC"
+        / f"{res_label}.cool"
+    )
+
+    ddpm_cool_path: Path | None = None
+    mar_cool_path: Path | None = None
+
+    if args.mustache_template or args.sip_template:
+        # Build predicted coolers as needed.
+        if cfg.model in ("ddpm", "both"):
+            ddpm_cool_path = ensure_predicted_cool_ddpm(cfg, chrom_sizes_path)
+        if cfg.model in ("mar", "both"):
+            mar_cool_path = ensure_predicted_cool_mar(cfg, chrom_sizes_path)
+
+        loops_dir = cfg.results_dir / "loops"
+        tol_bins = args.loop_tolerance_bins
+
+        # Mustache
+        if args.mustache_template:
+            # Experimental Micro-C and Hi-C.
+            microc_mustache = run_loop_caller_template(
+                template=args.mustache_template,
+                label="microc",
+                cool_path=microc_exp_path,
+                resolution=cfg.resolution,
+                chromosomes=cfg.chromosomes,
+                fdr_values=(0.05, 0.1),
+                out_dir=loops_dir,
+                tool_name="mustache",
+            )
+            hic_mustache = run_loop_caller_template(
+                template=args.mustache_template,
+                label="hic",
+                cool_path=hic_exp_path,
+                resolution=cfg.resolution,
+                chromosomes=cfg.chromosomes,
+                fdr_values=(0.05, 0.1),
+                out_dir=loops_dir,
+                tool_name="mustache",
+            )
+
+            loops_microc = parse_loops_bedpe(microc_mustache, cfg.resolution)
+            loops_hic = parse_loops_bedpe(hic_mustache, cfg.resolution)
+
+            if ddpm_cool_path is not None:
+                ddpm_mustache = run_loop_caller_template(
+                    template=args.mustache_template,
+                    label="ddpm",
+                    cool_path=ddpm_cool_path,
+                    resolution=cfg.resolution,
+                    chromosomes=cfg.chromosomes,
+                    fdr_values=(0.05, 0.1),
+                    out_dir=loops_dir,
+                    tool_name="mustache",
+                )
+                loops_ddpm = parse_loops_bedpe(ddpm_mustache, cfg.resolution)
+            else:
+                loops_ddpm = []
+
+            if mar_cool_path is not None:
+                mar_mustache = run_loop_caller_template(
+                    template=args.mustache_template,
+                    label="mar",
+                    cool_path=mar_cool_path,
+                    resolution=cfg.resolution,
+                    chromosomes=cfg.chromosomes,
+                    fdr_values=(0.05, 0.1),
+                    out_dir=loops_dir,
+                    tool_name="mustache",
+                )
+                loops_mar = parse_loops_bedpe(mar_mustache, cfg.resolution)
+            else:
+                loops_mar = []
+
+            # Compute overlap metrics vs Micro-C loops.
+            loops_section["mustache_hic_vs_microc"] = loop_overlap_metrics(
+                loops_microc,
+                loops_hic,
+                tol_bins,
+            )
+            loops_section["mustache_ddpm_vs_microc"] = loop_overlap_metrics(
+                loops_microc,
+                loops_ddpm,
+                tol_bins,
+            )
+            loops_section["mustache_mar_vs_microc"] = loop_overlap_metrics(
+                loops_microc,
+                loops_mar,
+                tol_bins,
+            )
+
+            # APA using Micro-C loops as reference.
+            apa_dir = cfg.results_dir / "apa"
+            apa_microc_mat, apa_microc_score = compute_apa(
+                microc_exp_path, loops_microc, cfg.resolution, args.apa_window_bins
+            )
+            apa_hic_mat, apa_hic_score = compute_apa(
+                hic_exp_path, loops_microc, cfg.resolution, args.apa_window_bins
+            )
+            apa_section["microc"] = {"score": apa_microc_score}
+            apa_section["hic"] = {"score": apa_hic_score}
+            save_apa_heatmap(
+                apa_microc_mat,
+                apa_dir / "apa_microc_from_microc_loops.png",
+                "APA Micro-C (Micro-C loops)",
+            )
+            save_apa_heatmap(
+                apa_hic_mat,
+                apa_dir / "apa_hic_from_microc_loops.png",
+                "APA Hi-C (Micro-C loops)",
+            )
+
+            if ddpm_cool_path is not None:
+                apa_ddpm_mat, apa_ddpm_score = compute_apa(
+                    ddpm_cool_path, loops_microc, cfg.resolution, args.apa_window_bins
+                )
+                apa_section["ddpm"] = {"score": apa_ddpm_score}
+                save_apa_heatmap(
+                    apa_ddpm_mat,
+                    apa_dir / "apa_ddpm_from_microc_loops.png",
+                    "APA DDPM (Micro-C loops)",
+                )
+            if mar_cool_path is not None:
+                apa_mar_mat, apa_mar_score = compute_apa(
+                    mar_cool_path, loops_microc, cfg.resolution, args.apa_window_bins
+                )
+                apa_section["mar"] = {"score": apa_mar_score}
+                save_apa_heatmap(
+                    apa_mar_mat,
+                    apa_dir / "apa_mar_from_microc_loops.png",
+                    "APA MAR (Micro-C loops)",
+                )
+
+        # SIP (optional, same structure; metrics stored separately).
+        if args.sip_template:
+            sip_loops_dir = cfg.results_dir / "loops"
+            microc_sip = run_loop_caller_template(
+                template=args.sip_template,
+                label="microc",
+                cool_path=microc_exp_path,
+                resolution=cfg.resolution,
+                chromosomes=cfg.chromosomes,
+                fdr_values=(0.01, 0.05),
+                out_dir=sip_loops_dir,
+                tool_name="sip",
+            )
+            hic_sip = run_loop_caller_template(
+                template=args.sip_template,
+                label="hic",
+                cool_path=hic_exp_path,
+                resolution=cfg.resolution,
+                chromosomes=cfg.chromosomes,
+                fdr_values=(0.01, 0.05),
+                out_dir=sip_loops_dir,
+                tool_name="sip",
+            )
+            loops_microc_sip = parse_loops_bedpe(microc_sip, cfg.resolution)
+            loops_hic_sip = parse_loops_bedpe(hic_sip, cfg.resolution)
+
+            if ddpm_cool_path is not None:
+                ddpm_sip = run_loop_caller_template(
+                    template=args.sip_template,
+                    label="ddpm",
+                    cool_path=ddpm_cool_path,
+                    resolution=cfg.resolution,
+                    chromosomes=cfg.chromosomes,
+                    fdr_values=(0.01, 0.05),
+                    out_dir=sip_loops_dir,
+                    tool_name="sip",
+                )
+                loops_ddpm_sip = parse_loops_bedpe(ddpm_sip, cfg.resolution)
+            else:
+                loops_ddpm_sip = []
+
+            if mar_cool_path is not None:
+                mar_sip = run_loop_caller_template(
+                    template=args.sip_template,
+                    label="mar",
+                    cool_path=mar_cool_path,
+                    resolution=cfg.resolution,
+                    chromosomes=cfg.chromosomes,
+                    fdr_values=(0.01, 0.05),
+                    out_dir=sip_loops_dir,
+                    tool_name="sip",
+                )
+                loops_mar_sip = parse_loops_bedpe(mar_sip, cfg.resolution)
+            else:
+                loops_mar_sip = []
+
+            loops_section["sip_hic_vs_microc"] = loop_overlap_metrics(
+                loops_microc_sip,
+                loops_hic_sip,
+                tol_bins,
+            )
+            loops_section["sip_ddpm_vs_microc"] = loop_overlap_metrics(
+                loops_microc_sip,
+                loops_ddpm_sip,
+                tol_bins,
+            )
+            loops_section["sip_mar_vs_microc"] = loop_overlap_metrics(
+                loops_microc_sip,
+                loops_mar_sip,
+                tol_bins,
+            )
+
+    if loops_section:
+        summary["loops"] = loops_section
+    if apa_section:
+        summary["apa"] = apa_section
 
     out_json = cfg.results_dir / "evaluation_summary.json"
     with out_json.open("w") as f:
