@@ -1,0 +1,58 @@
+seed: 42
+device: auto
+output_dir: checkpoints/ddpm_H_hff_5kb
+
+data:
+  cell_type: HFFc6
+  resolution: 5000
+  chromosomes_train:
+    - chr2
+    - chr3
+    - chr4
+    - chr5
+    - chr6
+    - chr7
+    - chr8
+    - chr9
+    - chr10
+    - chr11
+    - chr12
+    - chr13
+    - chr14
+    - chr15
+    - chr16
+    - chr18
+    - chr19
+    - chr20
+    - chr21
+    - chr22
+  chromosomes_val:
+    - chr17
+  hic_root: data/cool
+  microc_root: data/cool
+
+model:
+  # DDPM-H: highest-capacity UNet tier, analogous to MAR-H.
+  dim: 256
+  dim_mults: [1, 2, 4, 8]
+  resnet_block_groups: 4
+  weight_standardized: false
+  use_linear_attention: true
+
+optimizer:
+  batch_size: 2
+  lr: 1.0e-4
+  weight_decay: 0.0
+  epochs: 50
+  grad_clip: 1.0
+
+diffusion:
+  timesteps_train: 1000
+  beta_start_train: 1.0e-4
+  beta_end_train: 2.0e-2
+  timesteps_infer: 50
+  beta_start_infer: 1.0e-4
+  beta_end_infer: 0.95
+
+loss: l1
+

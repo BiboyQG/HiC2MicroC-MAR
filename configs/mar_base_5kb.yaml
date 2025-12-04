@@ -1,0 +1,72 @@
+seed: 42
+device: auto
+output_dir: checkpoints/mar_base_hff_5kb
+
+data:
+  cell_type: HFFc6
+  resolution: 5000
+  chromosomes_train:
+    - chr2
+    - chr3
+    - chr4
+    - chr5
+    - chr6
+    - chr7
+    - chr8
+    - chr9
+    - chr10
+    - chr11
+    - chr12
+    - chr13
+    - chr14
+    - chr15
+    - chr16
+    - chr18
+    - chr19
+    - chr20
+    - chr21
+    - chr22
+  chromosomes_val:
+    - chr17
+  hic_root: data/cool
+  microc_root: data/cool
+
+optimizer:
+  batch_size: 8
+  lr: 1.0e-4
+  weight_decay: 0.0
+  epochs: 50
+  grad_clip: 1.0
+
+tokenizer:
+  img_size: 256
+  patch_size: 16
+  token_dim: 256
+
+mar:
+  img_size: 256
+  patch_size: 16
+  token_dim: 256
+  # MAR-base spec (roughly):
+  # 768-d model, 12 layers, 12 heads
+  encoder_embed_dim: 768
+  encoder_depth: 12
+  encoder_num_heads: 12
+  decoder_embed_dim: 768
+  decoder_depth: 12
+  decoder_num_heads: 12
+  mlp_ratio: 4.0
+  attn_dropout: 0.1
+  proj_dropout: 0.1
+  buffer_size: 64
+  mask_ratio_min: 0.7
+  grad_checkpointing: false
+
+diff_head:
+  # Match MAR-base width
+  width: 768
+  depth: 3
+  diffusion_steps: 1000
+  num_sampling_steps: "100"
+
+
