@@ -158,9 +158,9 @@ For each chromosome, this will:
 
 ---
 
-## Evaluation: FID-like patch metrics and speed
+## Evaluation: FID, loops (Mustache/SIP), APA, and speed
 
-The unified evaluation script provides FID-like metrics on patches and simple speed benchmarks. It can reuse the inference logic to generate predictions on the fly.
+The unified evaluation script provides FID-like metrics on patches, simple speed benchmarks, loop recovery using Mustache/SIP, and APA. It can reuse the inference logic to generate predictions on the fly.
 
 Example (DDPM only):
 
@@ -189,17 +189,25 @@ uv run evaluate-hic2microc \
   --ddpm-config configs/ddpm_5kb.yaml \
   --ddpm-checkpoint checkpoints/ddpm_hff_5kb/ddpm_best.pt \
   --mar-config configs/mar_5kb.yaml \
-  --mar-checkpoint checkpoints/mar_hff_5kb/mar_best.pt
+  --mar-checkpoint checkpoints/mar_hff_5kb/mar_best.pt \
+  --chrom-sizes HiC2MicroC/data/hg38.sizes \
+  --mustache-template 'mustache -f {cool} -r {res} -ch {chrom} -o {out} --fdr {fdr}' \
+  --sip-template 'sip -f {cool} -r {res} -ch {chrom} -o {out} --fdr {fdr}' \
+  --loop-tolerance-bins 2 \
+  --apa-window-bins 5
 ```
 
-The script currently computes:
+The script computes:
 
 - FID-like scores between predicted and ground-truth Micro-C patches using `torch-fidelity`.
 - Basic speed metrics:
   - Average per-window inference time.
   - Total runtime and number of windows processed.
-
-The scaffold for loop calling (Mustache, SIP) and APA analysis is in place and can be extended to run those tools on experimental and predicted `.cool` files. This keeps the core evaluation logic in a single place while allowing you to plug in your preferred loop callers and APA workflows.
+- Loop metrics (per Mustache/SIP):
+  - Loop counts for experimental Hi-C, experimental Micro-C, DDPM, and MAR.
+  - Recall/precision-like overlap vs Micro-C loops with a configurable bin tolerance.
+- APA:
+  - APA matrices and scores for Hi-C, Micro-C, DDPM, and MAR, using Micro-C loops as the reference set.
 
 ---
 
