@@ -253,8 +253,17 @@ def infer_chromosome(
 
     hic_patches: List[np.ndarray] = []
     for idx in patch_indices:
-        row_region = (chrom, idx.row_start * resolution, idx.row_end * resolution)
-        col_region = (chrom, idx.col_start * resolution, idx.col_end * resolution)
+        # Use the same bp indexing convention as the original HiC2MicroC:
+        # start = idx_start * res, end = idx_end * res + res, then clamp to chr_len.
+        row_start_bp = idx.row_start * resolution
+        row_end_bp = (idx.row_end - 1) * resolution + resolution
+        col_start_bp = idx.col_start * resolution
+        col_end_bp = (idx.col_end - 1) * resolution + resolution
+        row_end_bp = min(row_end_bp, chrom_len)
+        col_end_bp = min(col_end_bp, chrom_len)
+
+        row_region = (chrom, row_start_bp, row_end_bp)
+        col_region = (chrom, col_start_bp, col_end_bp)
         mat = hic_clr.matrix(balance=True).fetch(row_region, col_region)
         mat = np.nan_to_num(mat, copy=True)
         mat[mat > max_value] = max_value
