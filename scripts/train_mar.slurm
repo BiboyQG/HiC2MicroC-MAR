@@ -3,7 +3,7 @@
 #  SLURM DIRECTIVES
 ##############################################################################
 #SBATCH --job-name=train-mar
-#SBATCH --partition=gpuA100x4
+#SBATCH --partition=gpuA100x4,gpuA100x8,gpuA40x4
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1         # one Python process
 #SBATCH --cpus-per-task=64          # give that process all CPU cores
