@@ -422,11 +422,12 @@ def run_loop_caller_template(
                 subprocess.run(cmd, shell=True, check=True)
                 per_chr_files.append(out_path)
             except FileNotFoundError:
-                print(f"[eval] {tool_name} not found on PATH; skipping.")
-                return Path()
+                print(f"[eval] {tool_name} not found on PATH; skipping all {tool_name} metrics.")
+                # Return a nonexistent path so downstream parsing just yields no loops.
+                return out_dir / f"{label}_{tool_name}_loops.bedpe"
             except subprocess.CalledProcessError as exc:
-                print(f"[eval] {tool_name} failed (skipping): {exc}")
-                return Path()
+                print(f"[eval] {tool_name} failed (skipping all {tool_name} metrics): {exc}")
+                return out_dir / f"{label}_{tool_name}_loops.bedpe"
 
     merged = out_dir / f"{label}_{tool_name}_loops.bedpe"
     with merged.open("w") as fout:
@@ -444,7 +445,7 @@ def run_loop_caller_template(
 def parse_loops_bedpe(path: Path, resolution: int) -> List[Tuple[str, int, int]]:
     """Parse a simple BEDPE-like loop file into (chrom, bin1, bin2)."""
     loops: List[Tuple[str, int, int]] = []
-    if not path.exists():
+    if not path.exists() or path.is_dir():
         return loops
 
     with path.open() as f:
