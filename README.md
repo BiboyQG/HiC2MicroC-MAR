@@ -191,7 +191,7 @@ uv run evaluate-hic2microc \
   --mar-config configs/mar_5kb.yaml \
   --mar-checkpoint checkpoints/mar_hff_5kb/mar_best.pt \
   --chrom-sizes HiC2MicroC/data/hg38.sizes \
-  --mustache-template 'mustache -f {cool} -r {res} -ch {chrom} -o {out} --fdr {fdr}' \
+  --mustache-template 'mustache -f {cool} -r {res} -ch {chrom} -o {out} -pt {fdr}' \
   --sip-template 'sip -f {cool} -r {res} -ch {chrom} -o {out} --fdr {fdr}' \
   --loop-tolerance-bins 2 \
   --apa-window-bins 5
